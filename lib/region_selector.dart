@@ -1,3 +1,4 @@
+import 'dart:ui' as ui;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
@@ -25,10 +26,15 @@ class RegionRect {
 /// );
 /// ```
 class RegionSelectorRoute extends PageRoute<RegionRect> {
-  RegionSelectorRoute() : super(fullscreenDialog: true);
+  /// Optional decoded desktop screenshot shown behind the overlay so the user
+  /// can see the full desktop while selecting a region.
+  final ui.Image? background;
+
+  RegionSelectorRoute({this.background}) : super(fullscreenDialog: true);
 
   @override
-  Color? get barrierColor => Colors.black.withOpacity(0.45);
+  Color? get barrierColor =>
+      background != null ? Colors.transparent : Colors.black.withOpacity(0.45);
 
   @override
   String? get barrierLabel => 'Cancel';
@@ -51,6 +57,7 @@ class RegionSelectorRoute extends PageRoute<RegionRect> {
     return _RegionSelectorPage(
       onSelected: (rect) => Navigator.of(context).pop(rect),
       onCancel: () => Navigator.of(context).pop(null),
+      background: background,
     );
   }
 }
@@ -58,9 +65,10 @@ class RegionSelectorRoute extends PageRoute<RegionRect> {
 class _RegionSelectorPage extends StatefulWidget {
   final ValueChanged<RegionRect> onSelected;
   final VoidCallback onCancel;
+  final ui.Image? background;
 
   const _RegionSelectorPage(
-      {required this.onSelected, required this.onCancel});
+      {required this.onSelected, required this.onCancel, this.background});
 
   @override
   State<_RegionSelectorPage> createState() => _RegionSelectorPageState();
@@ -124,6 +132,7 @@ class _RegionSelectorPageState extends State<_RegionSelectorPage> {
             painter: _SelectionPainter(
               selection: _selection,
               isDragging: _isDragging,
+              backgroundImage: widget.background,
             ),
             child: Stack(
               children: [
@@ -185,11 +194,20 @@ class _RegionSelectorPageState extends State<_RegionSelectorPage> {
 class _SelectionPainter extends CustomPainter {
   final Rect? selection;
   final bool isDragging;
+  final ui.Image? backgroundImage;
 
-  _SelectionPainter({this.selection, required this.isDragging});
+  _SelectionPainter({this.selection, required this.isDragging, this.backgroundImage});
 
   @override
   void paint(Canvas canvas, Size size) {
+    // Draw desktop screenshot behind the overlay so the user sees the real desktop
+    if (backgroundImage != null) {
+      final src = Rect.fromLTWH(0, 0,
+          backgroundImage!.width.toDouble(), backgroundImage!.height.toDouble());
+      final dst = Offset.zero & size;
+      canvas.drawImageRect(backgroundImage!, src, dst, Paint());
+    }
+
     final darkenPaint = Paint()..color = Colors.black.withOpacity(0.5);
 
     if (selection == null || selection!.isEmpty) {

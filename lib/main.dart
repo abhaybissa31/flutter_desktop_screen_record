@@ -1,4 +1,5 @@
 import 'dart:io';
+import 'dart:ui' as ui;
 import 'package:flutter/material.dart';
 import 'screen_recorder_plugin.dart';
 
@@ -77,8 +78,44 @@ class _RecorderHomeState extends State<RecorderHome> {
     if (Platform.isLinux) {
       // Native fullscreen X11 overlay selector
       region = await ScreenRecorderPlugin.selectRegion();
+    } else if (Platform.isWindows) {
+      // Capture desktop screenshot, go fullscreen, let user select on the
+      // real desktop image, start recording while still fullscreen (so
+      // ClientToScreen gives correct absolute coords), then restore window.
+      ui.Image? bgImage;
+      try {
+        final snapshot =
+            await ScreenRecorderPlugin.captureDesktopScreenshot();
+        if (snapshot != null) bgImage = await snapshot.decode();
+      } catch (_) {
+        // Non-fatal — selector will work without background
+      }
+
+      await ScreenRecorderPlugin.setFullscreen(true);
+      if (!mounted) return;
+
+      region = await Navigator.of(context).push<RegionRect>(
+        RegionSelectorRoute(background: bgImage),
+      );
+
+      if (!mounted) return;
+
+      if (region != null) {
+        // Start recording BEFORE restoring the window so that the
+        // coordinate conversion (ClientToScreen) uses the fullscreen
+        // window origin which maps to the real desktop.
+        setState(() => _region = region);
+        await _startRecording(region);
+      }
+
+      await ScreenRecorderPlugin.setFullscreen(false);
+
+      if (region == null && mounted) {
+        setState(() => _state = RecordingState.idle);
+      }
+      return;
     } else {
-      // Flutter overlay fallback for non-Linux platforms
+      // Flutter overlay fallback for other platforms
       region = await Navigator.of(context).push<RegionRect>(
         RegionSelectorRoute(),
       );

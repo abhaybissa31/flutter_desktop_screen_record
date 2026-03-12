@@ -1,6 +1,26 @@
 cmake_minimum_required(VERSION 3.14)
 project(runner LANGUAGES CXX)
 
+# Build the screen recorder plugin as a separate static library so that we can
+# compile it with relaxed warning settings (the Flutter runner enforces /WX).
+add_library(screen_recorder_native STATIC
+  "screen_recorder_plugin.cpp"
+)
+target_include_directories(screen_recorder_native PRIVATE
+  "${CMAKE_SOURCE_DIR}"
+  "${CMAKE_CURRENT_SOURCE_DIR}"
+)
+target_link_libraries(screen_recorder_native PUBLIC
+  flutter
+  flutter_wrapper_plugin
+)
+# /W3 instead of /W4 /WX — avoids treating Windows SDK macro-expansion warnings
+# as errors. /EHsc enables standard C++ exception unwinding.
+target_compile_options(screen_recorder_native PRIVATE /W3 /EHsc)
+target_compile_definitions(screen_recorder_native PRIVATE
+  UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN)
+add_dependencies(screen_recorder_native flutter_assemble)
+
 # Define the application target. To change its name, change BINARY_NAME in the
 # top-level CMakeLists.txt, not the value here, or `flutter run` will no longer
 # work.
@@ -35,6 +55,13 @@ target_compile_definitions(${BINARY_NAME} PRIVATE "NOMINMAX")
 target_link_libraries(${BINARY_NAME} PRIVATE flutter flutter_wrapper_app)
 target_link_libraries(${BINARY_NAME} PRIVATE "dwmapi.lib")
 target_include_directories(${BINARY_NAME} PRIVATE "${CMAKE_SOURCE_DIR}")
+
+# Resolve duplicate symbols between flutter_wrapper_app and flutter_wrapper_plugin
+target_link_options(${BINARY_NAME} PRIVATE /FORCE:MULTIPLE)
+
+# Link the screen recorder native plugin
+target_link_libraries(${BINARY_NAME} PRIVATE screen_recorder_native)
+target_include_directories(${BINARY_NAME} PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
 
 # Run the Flutter tool portions of the build. This must not be removed.
 add_dependencies(${BINARY_NAME} flutter_assemble)

@@ -3,6 +3,11 @@
 #include <optional>
 
 #include "flutter/generated_plugin_registrant.h"
+#include "screen_recorder_plugin.h"
+#include <flutter/plugin_registrar.h>
+#include <flutter/plugin_registrar_windows.h>
+
+#include <memory>
 
 FlutterWindow::FlutterWindow(const flutter::DartProject& project)
     : project_(project) {}
@@ -25,6 +30,21 @@ bool FlutterWindow::OnCreate() {
     return false;
   }
   RegisterPlugins(flutter_controller_->engine());
+
+  // Register our native screen recorder plugin.
+  // GetRegistrarForPlugin returns the C-API FlutterDesktopPluginRegistrarRef;
+  // PluginRegistrarWindows::GetInstance wraps it into the C++ PluginRegistrar*.
+  {
+    auto ref = flutter_controller_->engine()->GetRegistrarForPlugin(
+        "ScreenRecorderPlugin");
+    if (ref) {
+      screen_recorder_registrar_ =
+          std::make_unique<flutter::PluginRegistrarWindows>(ref);
+      ScreenRecorderPluginRegisterWithRegistrar(
+          screen_recorder_registrar_.get(), GetHandle());
+    }
+  }
+
   SetChildContent(flutter_controller_->view()->GetNativeWindow());
 
   flutter_controller_->engine()->SetNextFrameCallback([&]() {

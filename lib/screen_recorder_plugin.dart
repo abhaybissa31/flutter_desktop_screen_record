@@ -1,8 +1,33 @@
+import 'dart:async';
 import 'dart:io';
+import 'dart:ui' as ui;
 import 'package:flutter/services.dart';
 import 'region_selector.dart';
 
 export 'region_selector.dart';
+
+/// Raw desktop screenshot returned by [ScreenRecorderPlugin.captureDesktopScreenshot].
+class DesktopSnapshot {
+  final Uint8List bytes; // BGRA pixels
+  final int width;
+  final int height;
+
+  const DesktopSnapshot({
+    required this.bytes,
+    required this.width,
+    required this.height,
+  });
+
+  /// Decode the raw BGRA bytes into a [ui.Image] for painting.
+  Future<ui.Image> decode() {
+    final completer = Completer<ui.Image>();
+    ui.decodeImageFromPixels(
+      bytes, width, height, ui.PixelFormat.bgra8888,
+      completer.complete,
+    );
+    return completer.future;
+  }
+}
 
 class ScreenRecorderPlugin {
   static const MethodChannel _channel =
@@ -88,6 +113,26 @@ class ScreenRecorderPlugin {
   static Future<String?> stopRecording() async {
     final result = await _channel.invokeMethod<String>('stopRecording');
     return result;
+  }
+
+  /// Capture a screenshot of the entire virtual desktop (Windows only).
+  /// Returns a [DesktopSnapshot] with raw BGRA pixels, or null on failure.
+  static Future<DesktopSnapshot?> captureDesktopScreenshot() async {
+    if (!Platform.isWindows) return null;
+    final result = await _channel.invokeMethod<Map>('captureDesktopScreenshot');
+    if (result == null) return null;
+    return DesktopSnapshot(
+      bytes: result['bytes'] as Uint8List,
+      width: result['width'] as int,
+      height: result['height'] as int,
+    );
+  }
+
+  /// Toggle the Flutter window between fullscreen-borderless (covering all
+  /// monitors) and its previous normal state.  Used for OS-level region
+  /// selection on Windows.
+  static Future<void> setFullscreen(bool fullscreen) async {
+    await _channel.invokeMethod('setFullscreen', fullscreen);
   }
 
   /// Returns a suitable default output path for the current platform.
