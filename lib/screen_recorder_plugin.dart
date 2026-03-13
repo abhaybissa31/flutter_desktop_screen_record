@@ -35,19 +35,19 @@ class ScreenRecorderPlugin {
 
   /// Check if screen capture permission is granted and all dependencies are available.
   /// Returns null if OK, or a string describing missing dependencies.
-  static Future<String?> checkDependencies() async {
-    try {
-      await _channel.invokeMethod<bool>('checkPermissions');
-      return null; // All good
-    } on PlatformException catch (e) {
-      if (e.code == 'MISSING_DEPS') {
-        return e.message;
-      }
+static Future<String?> checkDependencies() async {
+  try {
+    await _channel.invokeMethod<bool>('checkPermissions');
+    return null;
+  } on PlatformException catch (e) {
+    if (e.code == 'MISSING_DEPS' || e.code == 'UNSUPPORTED_OS') {
       return e.message;
-    } catch (_) {
-      return null;
     }
+    return e.message;
+  } catch (_) {
+    return null;
   }
+}
 
   /// Check if screen capture permission is granted.
   static Future<bool> checkPermissions() async {

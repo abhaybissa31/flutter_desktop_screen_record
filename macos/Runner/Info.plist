@@ -28,5 +28,8 @@
 	<string>MainMenu</string>
 	<key>NSPrincipalClass</key>
 	<string>NSApplication</string>
+	<!-- Microphone access -->
+	<key>NSMicrophoneUsageDescription</key>
+	<string>Screen Recorder needs microphone access to record audio with your screen.</string>
 </dict>
 </plist>

@@ -345,11 +345,15 @@ static HRESULT init_wasapi(RecorderState* s) {
 }
 
 // ─── Media Foundation Sink Writer initialisation ─────────────────────────────
-static HRESULT init_mf_writer(RecorderState* s) {
-    // Allow MF to insert format-conversion MFTs automatically
+// Tries hardware H.264 encoding first; if it fails (buggy driver crash guard),
+// automatically retries with software (MS encoder) only.
+static HRESULT init_mf_writer_with_attrs(RecorderState* s, bool allow_hw) {
     ComPtr<IMFAttributes> attrs;
     MFCreateAttributes(&attrs, 2);
-    attrs->SetUINT32(MF_READWRITE_ENABLE_HARDWARE_TRANSFORMS, TRUE);
+    // Only enable hardware transforms if safe to do so.
+    // Some Intel iGPU drivers (mfx_mft_h264ve_64.dll) crash with 0xc0000005.
+    attrs->SetUINT32(MF_READWRITE_ENABLE_HARDWARE_TRANSFORMS,
+                     allow_hw ? TRUE : FALSE);
     attrs->SetUINT32(MF_SINK_WRITER_DISABLE_THROTTLING, TRUE);
 
     HRESULT hr = MFCreateSinkWriterFromURL(
@@ -357,12 +361,11 @@ static HRESULT init_mf_writer(RecorderState* s) {
     if (FAILED(hr)) return hr;
 
     // ── Video stream ──────────────────────────────────────────────────────────
-    // Output type: H.264
     ComPtr<IMFMediaType> vid_out;
     MFCreateMediaType(&vid_out);
     vid_out->SetGUID(MF_MT_MAJOR_TYPE, MFMediaType_Video);
     vid_out->SetGUID(MF_MT_SUBTYPE, MFVideoFormat_H264);
-    vid_out->SetUINT32(MF_MT_AVG_BITRATE, 4000000);            // 4 Mbps
+    vid_out->SetUINT32(MF_MT_AVG_BITRATE, 4000000);
     vid_out->SetUINT32(MF_MT_INTERLACE_MODE, MFVideoInterlace_Progressive);
     MFSetAttributeSize(vid_out.Get(), MF_MT_FRAME_SIZE,
                        static_cast<UINT32>(s->cap_w),
@@ -372,15 +375,13 @@ static HRESULT init_mf_writer(RecorderState* s) {
     hr = s->sink_writer->AddStream(vid_out.Get(), &s->vid_idx);
     if (FAILED(hr)) return hr;
 
-    // Input type: ARGB32 (= D3DFMT_A8R8G8B8 = BGRA memory layout, matches DXGI)
-    // Positive stride = top-down image, which is what DXGI gives us.
     ComPtr<IMFMediaType> vid_in;
     MFCreateMediaType(&vid_in);
     vid_in->SetGUID(MF_MT_MAJOR_TYPE, MFMediaType_Video);
     vid_in->SetGUID(MF_MT_SUBTYPE, MFVideoFormat_ARGB32);
     vid_in->SetUINT32(MF_MT_INTERLACE_MODE, MFVideoInterlace_Progressive);
     vid_in->SetUINT32(MF_MT_DEFAULT_STRIDE,
-                      static_cast<UINT32>(s->cap_w * 4));      // positive = top-down
+                      static_cast<UINT32>(s->cap_w * 4));
     MFSetAttributeSize(vid_in.Get(), MF_MT_FRAME_SIZE,
                        static_cast<UINT32>(s->cap_w),
                        static_cast<UINT32>(s->cap_h));
@@ -389,12 +390,11 @@ static HRESULT init_mf_writer(RecorderState* s) {
     hr = s->sink_writer->SetInputMediaType(s->vid_idx, vid_in.Get(), nullptr);
     if (FAILED(hr)) return hr;
 
-    // ── Audio stream (optional — failure just disables audio) ─────────────────
+    // ── Audio stream (optional) ───────────────────────────────────────────────
     if (s->has_audio) {
         UINT32 sr = static_cast<UINT32>(s->aud_sample_rate);
         UINT32 ch = static_cast<UINT32>(s->aud_channels);
 
-        // Output: AAC
         ComPtr<IMFMediaType> aud_out;
         MFCreateMediaType(&aud_out);
         aud_out->SetGUID(MF_MT_MAJOR_TYPE, MFMediaType_Audio);
@@ -402,11 +402,10 @@ static HRESULT init_mf_writer(RecorderState* s) {
         aud_out->SetUINT32(MF_MT_AUDIO_BITS_PER_SAMPLE, 16);
         aud_out->SetUINT32(MF_MT_AUDIO_SAMPLES_PER_SECOND, sr);
         aud_out->SetUINT32(MF_MT_AUDIO_NUM_CHANNELS, ch);
-        aud_out->SetUINT32(MF_MT_AUDIO_AVG_BYTES_PER_SECOND, 16000);  // ~128 kbps
+        aud_out->SetUINT32(MF_MT_AUDIO_AVG_BYTES_PER_SECOND, 16000);
 
         HRESULT ahr = s->sink_writer->AddStream(aud_out.Get(), &s->aud_idx);
         if (SUCCEEDED(ahr)) {
-            // Input: PCM 16-bit (we convert from whatever WASAPI gives us)
             ComPtr<IMFMediaType> aud_in;
             MFCreateMediaType(&aud_in);
             aud_in->SetGUID(MF_MT_MAJOR_TYPE, MFMediaType_Audio);
@@ -419,14 +418,24 @@ static HRESULT init_mf_writer(RecorderState* s) {
             ahr = s->sink_writer->SetInputMediaType(
                 s->aud_idx, aud_in.Get(), nullptr);
         }
-        if (FAILED(ahr)) {
-            s->has_audio = false;   // gracefully fall back to video-only
-        }
+        if (FAILED(ahr)) s->has_audio = false;
     }
 
     return s->sink_writer->BeginWriting();
 }
 
+static HRESULT init_mf_writer(RecorderState* s) {
+    // First try with hardware acceleration (faster encoding).
+    HRESULT hr = init_mf_writer_with_attrs(s, /*allow_hw=*/true);
+    if (SUCCEEDED(hr)) return hr;
+
+    // Hardware encoder failed (e.g. buggy Intel mfx_mft_h264ve_64.dll driver).
+    // Reset sink writer and retry with software-only encoding.
+    s->sink_writer.Reset();
+    s->vid_idx = 0;
+    s->aud_idx = 0;
+    return init_mf_writer_with_attrs(s, /*allow_hw=*/false);
+}
 // ─── Video capture thread ─────────────────────────────────────────────────────
 static void video_thread_func(RecorderState* s) {
     ::CoInitializeEx(nullptr, COINIT_MULTITHREADED);

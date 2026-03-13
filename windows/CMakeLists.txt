@@ -106,3 +106,18 @@ install(DIRECTORY "${PROJECT_BUILD_DIR}/${FLUTTER_ASSET_DIR_NAME}"
 install(FILES "${AOT_LIBRARY}" DESTINATION "${INSTALL_BUNDLE_DATA_DIR}"
   CONFIGURATIONS Profile;Release
   COMPONENT Runtime)
+
+# Bundle Visual C++ runtime DLLs so the app works without VC++ Redistributable.
+# Find the VC redist directory from the MSVC toolset.
+file(GLOB _VCRT_DIRS
+  "C:/Program Files (x86)/Microsoft Visual Studio/2022/*/VC/Redist/MSVC/*/x64/Microsoft.VC*.CRT"
+  "C:/Program Files/Microsoft Visual Studio/2022/*/VC/Redist/MSVC/*/x64/Microsoft.VC*.CRT"
+)
+list(LENGTH _VCRT_DIRS _VCRT_COUNT)
+if(_VCRT_COUNT GREATER 0)
+  list(GET _VCRT_DIRS 0 _VCRT_DIR)
+  file(GLOB _VCRT_DLLS "${_VCRT_DIR}/*.dll")
+  install(FILES ${_VCRT_DLLS}
+    DESTINATION "${INSTALL_BUNDLE_LIB_DIR}"
+    COMPONENT Runtime)
+endif()
