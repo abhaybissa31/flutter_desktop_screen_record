@@ -436,6 +436,100 @@ static HRESULT init_mf_writer(RecorderState* s) {
     s->aud_idx = 0;
     return init_mf_writer_with_attrs(s, /*allow_hw=*/false);
 }
+
+// Composite the DXGI cursor onto the BGRA frame buffer.
+// Handles both monochrome (AND+XOR mask) and colour cursors.
+static void draw_cursor_dxgi(RecorderState* s,
+                              BYTE* frame,          // BGRA, cap_w * cap_h * 4
+                              const DXGI_OUTDUPL_FRAME_INFO& fi) {
+    if (fi.PointerPosition.Visible == FALSE) return;
+    if (fi.PointerShapeBufferSize == 0) return;
+
+    // Fetch cursor shape
+    UINT shape_size = fi.PointerShapeBufferSize;
+    std::vector<BYTE> shape_buf(shape_size);
+    DXGI_OUTDUPL_POINTER_SHAPE_INFO shape_info = {};
+    UINT required = 0;
+    HRESULT hr = s->duplication->GetFramePointerShape(
+        shape_size, shape_buf.data(), &required, &shape_info);
+    if (FAILED(hr)) return;
+
+    // Cursor position on screen (physical pixels, virtual desktop coords)
+    int cx = fi.PointerPosition.Position.x - shape_info.HotSpot.x - s->cap_x;
+    int cy = fi.PointerPosition.Position.y - shape_info.HotSpot.y - s->cap_y;
+    int cw = static_cast<int>(shape_info.Width);
+    int ch = static_cast<int>(shape_info.Height);
+
+    if (shape_info.Type == DXGI_OUTDUPL_POINTER_SHAPE_TYPE_COLOR) {
+        // 32-bit BGRA cursor — straight alpha blend onto frame
+        for (int row = 0; row < ch; ++row) {
+            int fy = cy + row;
+            if (fy < 0 || fy >= s->cap_h) continue;
+            for (int col = 0; col < cw; ++col) {
+                int fx = cx + col;
+                if (fx < 0 || fx >= s->cap_w) continue;
+                const BYTE* src = shape_buf.data() +
+                                  row * shape_info.Pitch + col * 4;
+                BYTE* dst = frame + (fy * s->cap_w + fx) * 4;
+                BYTE a = src[3];
+                if (a == 0) continue;
+                dst[0] = static_cast<BYTE>((src[0] * a + dst[0] * (255 - a)) / 255); // B
+                dst[1] = static_cast<BYTE>((src[1] * a + dst[1] * (255 - a)) / 255); // G
+                dst[2] = static_cast<BYTE>((src[2] * a + dst[2] * (255 - a)) / 255); // R
+            }
+        }
+    } else if (shape_info.Type == DXGI_OUTDUPL_POINTER_SHAPE_TYPE_MONOCHROME) {
+        // 1-bit AND+XOR mask — height is doubled (top half = AND, bottom = XOR)
+        ch /= 2;
+        int pitch = shape_info.Pitch;
+        for (int row = 0; row < ch; ++row) {
+            int fy = cy + row;
+            if (fy < 0 || fy >= s->cap_h) continue;
+            for (int col = 0; col < cw; ++col) {
+                int fx = cx + col;
+                if (fx < 0 || fx >= s->cap_w) continue;
+                int byte_idx = row * pitch + col / 8;
+                int bit      = 7 - (col % 8);
+                bool and_bit = (shape_buf[byte_idx]        >> bit) & 1;
+                bool xor_bit = (shape_buf[byte_idx + ch * pitch] >> bit) & 1;
+                BYTE* dst = frame + (fy * s->cap_w + fx) * 4;
+                if (!and_bit && !xor_bit)  { dst[0]=dst[1]=dst[2]=0; }        // black
+                else if (!and_bit && xor_bit)  { dst[0]=dst[1]=dst[2]=0xFF; } // white
+                else if (and_bit && xor_bit)   { dst[0]^=0xFF; dst[1]^=0xFF; dst[2]^=0xFF; } // invert
+                // and=1 xor=0 → transparent, leave dst untouched
+            }
+        }
+    } else {
+        // MASKED_COLOR: top half is AND mask (1-bit), bottom half is 32-bit XOR color
+        ch /= 2;
+        int and_pitch = shape_info.Pitch;
+        int xor_offset = ch * and_pitch;
+        int xor_pitch  = cw * 4;
+        for (int row = 0; row < ch; ++row) {
+            int fy = cy + row;
+            if (fy < 0 || fy >= s->cap_h) continue;
+            for (int col = 0; col < cw; ++col) {
+                int fx = cx + col;
+                if (fx < 0 || fx >= s->cap_w) continue;
+                int bit_idx = row * and_pitch + col / 8;
+                int bit     = 7 - (col % 8);
+                bool and_bit = (shape_buf[bit_idx] >> bit) & 1;
+                const BYTE* xor_px = shape_buf.data() + xor_offset +
+                                     row * xor_pitch + col * 4;
+                BYTE* dst = frame + (fy * s->cap_w + fx) * 4;
+                if (and_bit) {
+                    dst[0] ^= xor_px[0];
+                    dst[1] ^= xor_px[1];
+                    dst[2] ^= xor_px[2];
+                } else {
+                    dst[0] = xor_px[0];
+                    dst[1] = xor_px[1];
+                    dst[2] = xor_px[2];
+                }
+            }
+        }
+    }
+}
 // ─── Video capture thread ─────────────────────────────────────────────────────
 static void video_thread_func(RecorderState* s) {
     ::CoInitializeEx(nullptr, COINIT_MULTITHREADED);
@@ -463,17 +557,27 @@ static void video_thread_func(RecorderState* s) {
         next_write += frame_period;
 
         // ── Acquire a frame ────────────────────────────────────────────────
-        if (s->use_gdi) {
-            // GDI fallback: BitBlt the capture region from the screen DC
+if (s->use_gdi) {
             HGDIOBJ old = SelectObject(s->gdi_mem_dc, s->gdi_bitmap);
+            // CAPTUREBLT alone doesn't capture cursor; draw it manually below
             BitBlt(s->gdi_mem_dc, 0, 0, s->cap_w, s->cap_h,
-                   s->gdi_screen_dc, s->cap_x, s->cap_y, SRCCOPY);
+                   s->gdi_screen_dc, s->cap_x, s->cap_y, SRCCOPY | CAPTUREBLT);
+
+            // Draw cursor onto the memory DC at its current screen position
+            CURSORINFO ci = { sizeof(CURSORINFO) };
+            if (GetCursorInfo(&ci) && ci.flags == CURSOR_SHOWING) {
+                int cx = ci.ptScreenPos.x - s->cap_x;
+                int cy = ci.ptScreenPos.y - s->cap_y;
+                DrawIconEx(s->gdi_mem_dc, cx, cy, ci.hCursor,
+                           0, 0, 0, nullptr, DI_NORMAL);
+            }
+
             SelectObject(s->gdi_mem_dc, old);
 
             BITMAPINFOHEADER bi = {};
             bi.biSize        = sizeof(bi);
             bi.biWidth       = s->cap_w;
-            bi.biHeight      = -(s->cap_h);  // top-down
+            bi.biHeight      = -(s->cap_h);
             bi.biPlanes      = 1;
             bi.biBitCount    = 32;
             bi.biCompression = BI_RGB;
@@ -484,12 +588,13 @@ static void video_thread_func(RecorderState* s) {
                       reinterpret_cast<BITMAPINFO*>(&bi),
                       DIB_RGB_COLORS);
 
-            // GDI BGRX has undefined alpha — set to 0xFF
             for (DWORD i = 3; i < buf_bytes; i += 4)
                 last_frame[i] = 0xFF;
 
             have_frame = true;
-        } else {
+        }
+        
+        else {
             // DXGI Desktop Duplication path (non-blocking)
             DXGI_OUTDUPL_FRAME_INFO fi = {};
             ComPtr<IDXGIResource> res;
@@ -523,6 +628,9 @@ static void video_thread_func(RecorderState* s) {
                                 memcpy(dst, src, static_cast<size_t>(row_bytes));
                             }
                             s->d3d_ctx->Unmap(s->staging.Get(), 0);
+                               // ── Draw cursor ──────────────────────────────────────
+                        draw_cursor_dxgi(s, last_frame.data(), fi);
+                        
                             have_frame = true;
                         }
                     }

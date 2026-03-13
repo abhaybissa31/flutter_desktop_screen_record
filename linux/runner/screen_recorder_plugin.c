@@ -15,6 +15,7 @@
 #include <X11/Xutil.h>
 #include <X11/Xatom.h>
 #include <X11/extensions/XShm.h>
+#include <X11/extensions/Xfixes.h>
 #include <X11/cursorfont.h>
 #include <X11/keysym.h>
 #include <sys/shm.h>
@@ -351,6 +352,9 @@ static bool setup_screencast_portal(RecorderState* s, char* err_out) {
     g_variant_builder_add(&opts2, "{sv}", "handle_token", g_variant_new_string(tok2));
     g_variant_builder_add(&opts2, "{sv}", "types", g_variant_new_uint32(1));  // MONITOR
     g_variant_builder_add(&opts2, "{sv}", "multiple", g_variant_new_boolean(FALSE));
+    g_variant_builder_add(&opts2, "{sv}", "types",       g_variant_new_uint32(1));   // MONITOR
+    g_variant_builder_add(&opts2, "{sv}", "multiple",    g_variant_new_boolean(FALSE));
+    g_variant_builder_add(&opts2, "{sv}", "cursor_mode", g_variant_new_uint32(2));   // ← ADD: embedded cursor
 
     GVariant* ret2 = g_dbus_connection_call_sync(
         bus, PORTAL_BUS_NAME, PORTAL_OBJ_PATH, PORTAL_SCREENCAST_IF,
@@ -757,6 +761,52 @@ static void cleanup_x11(RecorderState* s) {
     }
 }
 
+// Composite the X11 cursor onto the BGRx frame buffer.
+// frame_data: pointer to the frame (BGRx, stride = w*4)
+// frame_x, frame_y: top-left of the capture region on screen
+static void draw_cursor_on_frame(Display* dpy,
+                                  uint8_t* frame_data,
+                                  int frame_x, int frame_y,
+                                  int frame_w, int frame_h) {
+    XFixesCursorImage* ci = XFixesGetCursorImage(dpy);
+    if (!ci) return;
+
+    // ci->x, ci->y is the cursor position on screen (top-left of hotspot)
+    // ci->xhot, ci->yhot is the hotspot offset within the cursor image
+    int cx = (int)ci->x - ci->xhot - frame_x;
+    int cy = (int)ci->y - ci->yhot - frame_y;
+    int cw = (int)ci->width;
+    int ch = (int)ci->height;
+
+    for (int row = 0; row < ch; row++) {
+        int fy = cy + row;
+        if (fy < 0 || fy >= frame_h) continue;
+
+        for (int col = 0; col < cw; col++) {
+            int fx = cx + col;
+            if (fx < 0 || fx >= frame_w) continue;
+
+            // XFixes pixels are ARGB packed in unsigned long
+            uint32_t cpx = (uint32_t)ci->pixels[row * cw + col];
+            uint8_t  a   = (cpx >> 24) & 0xFF;
+            if (a == 0) continue;
+
+            uint8_t cr = (cpx >> 16) & 0xFF;
+            uint8_t cg = (cpx >>  8) & 0xFF;
+            uint8_t cb = (cpx >>  0) & 0xFF;
+
+            uint8_t* dst = frame_data + (fy * frame_w + fx) * 4;
+            // Frame is BGRx
+            dst[0] = (uint8_t)((cb * a + dst[0] * (255 - a)) / 255);  // B
+            dst[1] = (uint8_t)((cg * a + dst[1] * (255 - a)) / 255);  // G
+            dst[2] = (uint8_t)((cr * a + dst[2] * (255 - a)) / 255);  // R
+            // dst[3] is padding, leave it
+        }
+    }
+
+    XFree(ci);
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Video thread (X11 mode only — PipeWire mode doesn't need this)
 // ─────────────────────────────────────────────────────────────────────────────
@@ -801,7 +851,13 @@ static void* video_thread_proc(void* arg) {
                        expected_stride);
             }
         }
+
+         // ── Draw cursor onto the frame ──────────────────────────────────────
+        draw_cursor_on_frame(s->display, map.data, s->x, s->y, s->w, s->h);
+        // ───────────────────────────────────────────────────────────────────
+
         gst_buffer_unmap(buf, &map);
+
 
         GstClockTime ts = (GstClockTime)((long long)frame_idx * FRAME_NS);
         GST_BUFFER_PTS(buf)      = ts;

@@ -10,6 +10,7 @@ project(runner LANGUAGES C CXX)
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(X11     REQUIRED IMPORTED_TARGET x11)
 pkg_check_modules(XEXT    REQUIRED IMPORTED_TARGET xext)
+pkg_check_modules(XFIXES  REQUIRED IMPORTED_TARGET xfixes)
 pkg_check_modules(PULSE   REQUIRED IMPORTED_TARGET libpulse-simple)
 pkg_check_modules(GST     REQUIRED IMPORTED_TARGET gstreamer-1.0)
 pkg_check_modules(GST_APP REQUIRED IMPORTED_TARGET gstreamer-app-1.0)
@@ -26,6 +27,7 @@ target_link_libraries(screen_recorder_native PRIVATE
   PkgConfig::GTK
   PkgConfig::X11
   PkgConfig::XEXT
+  PkgConfig::XFIXES
   PkgConfig::PULSE
   PkgConfig::GST
   PkgConfig::GST_APP
@@ -58,6 +60,7 @@ target_link_libraries(${BINARY_NAME} PRIVATE
   screen_recorder_native
   PkgConfig::X11
   PkgConfig::XEXT
+  PkgConfig::XFIXES
   PkgConfig::PULSE
   PkgConfig::GST
   PkgConfig::GST_APP
